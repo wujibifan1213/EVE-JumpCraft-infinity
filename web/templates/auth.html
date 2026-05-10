@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EVE SSO 授权 - JumpCraft</title>
+<link rel="stylesheet" href="/static/style.css?v=2">
+</head>
+<body>
+<div class="container auth-container">
+  <header>
+    <h1>EVE SSO 授权</h1>
+    <span class="datasource">登录后可搜索玩家建筑</span>
+  </header>
+
+  <nav class="nav-bar">
+    <a href="/">&#8592; 返回路线计算</a>
+    <a href="/auth">授权管理</a>
+  </nav>
+
+  <div id="auth-status" class="auth-section">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+      <span class="status-badge" id="status-badge">
+        <span id="status-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#f59e0b;"></span>
+        <span id="status-label">检查中...</span>
+      </span>
+      <span class="status-msg" id="status-msg"></span>
+    </div>
+  </div>
+
+  <div id="login-section" class="auth-section hidden">
+    <h2 style="font-size:1rem;color:#111827;margin-bottom:12px;">登录 EVE Online</h2>
+
+    <button class="login-btn" id="login-btn" onclick="startLogin()">
+      通过 EVE SSO 登录
+    </button>
+
+    <div id="code-area" class="code-group hidden">
+      <label for="auth-code">授权码</label>
+      <textarea id="auth-code" placeholder="从浏览器地址栏复制 ?code= 后面的内容..."></textarea>
+      <p class="code-hint">
+        授权完成后，浏览器会跳转到 ESI 回调页面。<br>
+        请从浏览器地址栏复制 <code style="color:#374151;">?code=</code> 后面的完整授权码。
+      </p>
+      <div class="submit-row">
+        <button id="submit-code-btn" onclick="submitCode()">提交授权码</button>
+        <button class="btn-outline" onclick="cancelLogin()">取消</button>
+      </div>
+    </div>
+
+    <div id="auth-url-area" class="hidden" style="margin-top:10px;padding:10px;background:#f9fafb;border-radius:4px;word-break:break-all;border:1px solid #e5e7eb;">
+      <p style="font-size:0.75rem;color:#9ca3af;margin-bottom:4px;">如果弹窗被拦截，请手动打开以下链接：</p>
+      <a id="auth-url-link" href="#" target="_blank" style="font-size:0.8rem;color:#374151;"></a>
+      <br>
+      <code id="auth-url-text" style="font-size:0.7rem;color:#6b7280;user-select:all;"></code>
+    </div>
+
+    <div id="login-error" class="error hidden"></div>
+    <div id="login-success" class="success-msg hidden"></div>
+
+    <ol class="step-list" style="margin-top:16px;border-top:1px solid #e5e7eb;padding-top:12px;">
+      <li><span class="step-num">1</span> 点击上方按钮，在新窗口中打开 EVE SSO 登录页</li>
+      <li><span class="step-num">2</span> 登录你的 EVE 账号并授权</li>
+      <li><span class="step-num">3</span> 授权后浏览器跳转到 ESI 回调页面</li>
+      <li><span class="step-num">4</span> 从地址栏复制授权码，粘贴到上方输入框</li>
+      <li><span class="step-num">5</span> 点击"提交授权码"完成绑定</li>
+    </ol>
+  </div>
+
+  <div id="char-section" class="auth-section hidden">
+    <div class="char-card">
+      <div class="char-avatar">&#128100;</div>
+      <div class="char-details">
+        <div class="char-name" id="char-name">-</div>
+        <div class="char-id" id="char-id">-</div>
+        <div class="char-scopes" id="char-scopes">-</div>
+      </div>
+      <button class="logout-btn" onclick="doLogout()">退出登录</button>
+    </div>
+    <div class="status-msg" style="margin-top:8px;" id="char-expires"></div>
+
+    <div class="token-display" style="margin-top:12px;padding-top:12px;border-top:1px solid #e5e7eb;">
+      <label style="font-size:0.75rem;color:#9ca3af;display:block;margin-bottom:4px;">Access Token</label>
+      <code id="token-display" style="display:block;padding:8px;background:#f9fafb;border-radius:4px;font-size:0.7rem;color:#6b7280;word-break:break-all;user-select:all;max-height:60px;overflow-y:auto;border:1px solid #e5e7eb;">-</code>
+    </div>
+  </div>
+</div>
+
+<script>
+let authState = null;
+
+async function checkStatus() {
+  try {
+    const resp = await fetch('/api/auth/status');
+    const data = await resp.json();
+
+    const badge = document.getElementById('status-badge');
+    const dot = document.getElementById('status-dot');
+    const label = document.getElementById('status-label');
+    const msg = document.getElementById('status-msg');
+
+    if (data.logged_in) {
+      badge.className = 'status-badge status-logged-in';
+      dot.style.background = '#22c55e';
+      label.textContent = '已登录';
+      msg.textContent = data.character_name || 'Token 有效';
+      showCharSection(data);
+      showLoginSection(false);
+    } else {
+      badge.className = 'status-badge status-logged-out';
+      dot.style.background = '#f59e0b';
+      label.textContent = '未登录';
+      msg.textContent = data.message || '';
+      showCharSection(false);
+      showLoginSection(true);
+    }
+  } catch(e) {
+    document.getElementById('status-label').textContent = '状态检查失败';
+    document.getElementById('status-msg').textContent = e.message;
+  }
+}
+
+function showLoginSection(show) {
+  document.getElementById('login-section').classList.toggle('hidden', !show);
+}
+
+function showCharSection(data) {
+  const section = document.getElementById('char-section');
+  if (!data || !data.logged_in) {
+    section.classList.add('hidden');
+    return;
+  }
+  section.classList.remove('hidden');
+  document.getElementById('char-name').textContent = data.character_name || 'Unknown';
+  document.getElementById('char-id').textContent = 'Character ID: ' + (data.character_id || '-');
+  document.getElementById('char-scopes').textContent = 'Scopes: ' + (data.scopes || '-');
+  document.getElementById('char-expires').textContent = data.expires_on
+    ? 'Expires: ' + data.expires_on
+    : '';
+  document.getElementById('token-display').textContent = data.access_token || '-';
+}
+
+async function startLogin() {
+  const btn = document.getElementById('login-btn');
+  const errorDiv = document.getElementById('login-error');
+  const successDiv = document.getElementById('login-success');
+  const codeArea = document.getElementById('code-area');
+  const urlArea = document.getElementById('auth-url-area');
+
+  errorDiv.classList.add('hidden');
+  successDiv.classList.add('hidden');
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> 正在获取授权链接...';
+
+  try {
+    const resp = await fetch('/api/auth/url');
+    const data = await resp.json();
+
+    if (data.url) {
+      authState = data.state;
+      codeArea.classList.remove('hidden');
+      urlArea.classList.remove('hidden');
+      document.getElementById('auth-url-link').href = data.url;
+      document.getElementById('auth-url-text').textContent = data.url;
+      window.open(data.url, '_blank', 'width=800,height=700');
+      btn.disabled = false;
+      btn.textContent = '已在浏览器中打开授权页';
+    } else {
+      showError(data.message || '获取授权链接失败');
+      btn.disabled = false;
+      btn.textContent = '通过 EVE SSO 登录';
+    }
+  } catch(e) {
+    showError('请求失败: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = '通过 EVE SSO 登录';
+  }
+}
+
+async function submitCode() {
+  let rawCode = document.getElementById('auth-code').value.trim();
+  const errorDiv = document.getElementById('login-error');
+  const successDiv = document.getElementById('login-success');
+
+  errorDiv.classList.add('hidden');
+  successDiv.classList.add('hidden');
+
+  const codeMatch = rawCode.match(/(?:[?&]code=)([^&\s]+)/);
+  if (codeMatch) {
+    rawCode = decodeURIComponent(codeMatch[1]);
+  }
+
+  if (!rawCode) {
+    showError('请粘贴授权码');
+    return;
+  }
+
+  const submitBtn = document.getElementById('submit-code-btn');
+  submitBtn.disabled = true;
+  submitBtn.innerHTML = '<span class="spinner"></span> 交换中...';
+
+  try {
+    const resp = await fetch('/api/auth/callback', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({code: rawCode})
+    });
+    const data = await resp.json();
+
+    if (data.status === 'ok') {
+      successDiv.textContent = '授权成功！角色: ' + (data.character_name || 'Unknown');
+      successDiv.classList.remove('hidden');
+      document.getElementById('code-area').classList.add('hidden');
+      document.getElementById('auth-url-area').classList.add('hidden');
+      document.getElementById('auth-code').value = '';
+      document.getElementById('login-btn').textContent = '通过 EVE SSO 登录';
+      authState = null;
+      await checkStatus();
+    } else {
+      showError(data.message || '授权码交换失败');
+    }
+  } catch(e) {
+    showError('请求失败: ' + e.message);
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = '提交授权码';
+  }
+}
+
+function cancelLogin() {
+  document.getElementById('code-area').classList.add('hidden');
+  document.getElementById('auth-url-area').classList.add('hidden');
+  document.getElementById('auth-code').value = '';
+  document.getElementById('login-error').classList.add('hidden');
+  document.getElementById('login-btn').textContent = '通过 EVE SSO 登录';
+  authState = null;
+}
+
+async function doLogout() {
+  try {
+    const resp = await fetch('/api/auth/logout', {method: 'POST'});
+    const data = await resp.json();
+    if (data.status === 'ok') {
+      await checkStatus();
+    }
+  } catch(e) {
+    document.getElementById('status-msg').textContent = '退出失败: ' + e.message;
+  }
+}
+
+function showError(msg) {
+  const errorDiv = document.getElementById('login-error');
+  errorDiv.textContent = msg;
+  errorDiv.classList.remove('hidden');
+}
+
+checkStatus();
+</script>
+</body>
+</html>

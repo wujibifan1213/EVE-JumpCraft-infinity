@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EVE 旗舰跳跃路线计算</title>
+<link rel="stylesheet" href="/static/style.css?v=2">
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>EVE 旗舰跳跃路线计算</h1>
+    <span class="datasource">datasource: infinity (曙光)</span>
+  </header>
+
+  <nav class="nav-bar">
+    <a href="/">路线计算</a>
+    <a href="/auth">SSO 授权</a>
+  </nav>
+
+  <div class="panel">
+    <div class="route-inputs">
+      <div class="input-group">
+        <label>起点</label>
+        <input type="text" id="source-input" placeholder="输入星系名称..." autocomplete="off">
+        <div class="autocomplete" id="source-suggestions"></div>
+        <input type="hidden" id="source-id">
+      </div>
+      <div id="waypoints-container"></div>
+      <div class="input-group">
+        <label>终点</label>
+        <input type="text" id="target-input" placeholder="输入星系名称..." autocomplete="off">
+        <div class="autocomplete" id="target-suggestions"></div>
+        <input type="hidden" id="target-id">
+      </div>
+      <div class="input-actions">
+        <button type="button" class="btn-link" onclick="addWaypoint()">+ 途经点</button>
+      </div>
+    </div>
+
+    <div class="settings-row">
+      <div class="mode-group">
+        <label>旗舰跳跃范围</label>
+        <div class="radio-group">
+          <label class="radio-label"><input type="radio" name="jump_range" value="6"> 6LY</label>
+          <label class="radio-label"><input type="radio" name="jump_range" value="7"> 7LY</label>
+          <label class="radio-label"><input type="radio" name="jump_range" value="8"> 8LY</label>
+          <label class="radio-label"><input type="radio" name="jump_range" value="10" checked> 10LY</label>
+          <label class="radio-label"><input type="radio" name="jump_range" value="12"> 12LY</label>
+        </div>
+      </div>
+      <div class="mode-group checkboxes">
+        <label class="radio-label"><input type="checkbox" id="require-buildings"> 必须经过有建筑的星系</label>
+        <label class="radio-label"><input type="checkbox" id="query-buildings" checked> 查询途径建筑</label>
+        <label class="radio-label" title="优先减少旗舰跳次数，允许起点/终点各多走1星门以获取建筑挂靠"><input type="checkbox" id="allow-dirt-road"> 允许土路</label>
+      </div>
+    </div>
+
+    <div class="avoid-section">
+      <div class="avoid-header" onclick="toggleAvoidSection()">
+        <span class="avoid-title">避开星系</span>
+        <span id="avoid-count" class="avoid-count"></span>
+        <span id="avoid-toggle-icon" class="avoid-toggle-icon">&#9656;</span>
+      </div>
+      <div id="avoid-body" class="avoid-body hidden">
+        <div id="avoid-add-row" class="avoid-add-row">
+          <input type="text" id="avoid-input" placeholder="输入星系名称后选择..." autocomplete="off">
+          <div class="autocomplete" id="avoid-suggestions"></div>
+          <input type="hidden" id="avoid-id">
+        </div>
+        <div id="avoid-list" class="avoid-list"></div>
+      </div>
+    </div>
+
+    <div class="action-row">
+      <button id="calc-btn" onclick="calculateRoute()">计算路线</button>
+      <button id="rebuild-btn" class="btn-secondary" onclick="rebuildStarmap()" title="从 ESI 重新拉取数据">⟳ 重建星图</button>
+    </div>
+  </div>
+
+  <div id="route-result" class="route-result hidden">
+    <div class="route-header">
+      <span id="route-summary"></span>
+      <span id="route-mode-tag" class="tag"></span>
+    </div>
+    <div id="route-note" class="route-note hidden"></div>
+    <div class="route-path" id="route-path"></div>
+  </div>
+
+  <div id="building-modal" class="building-modal hidden">
+    <div class="building-modal-overlay" onclick="closeBuildingModal()"></div>
+    <div class="building-modal-content">
+      <div class="building-modal-header">
+        <span id="building-modal-title"></span>
+        <button class="modal-close" onclick="closeBuildingModal()">&times;</button>
+      </div>
+      <div id="building-modal-body"></div>
+    </div>
+  </div>
+
+  <div id="error-msg" class="error hidden"></div>
+</div>
+
+<script>
+let waypointCounter = 0;
+
+function debounce(fn, delay) {
+  let timer;
+  return function(...args) {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn.apply(this, args), delay);
+  };
+}
+
+function setupAutocomplete(inputId, suggestionsId, hiddenId) {
+  const input = document.getElementById(inputId);
+  const suggestions = document.getElementById(suggestionsId);
+  const hidden = document.getElementById(hiddenId);
+
+  input.addEventListener('input', debounce(async function() {
+    const q = this.value.trim();
+    if (q.length < 1) {
+      suggestions.innerHTML = '';
+      suggestions.classList.remove('show');
+      return;
+    }
+    try {
+      const resp = await fetch(`/api/systems/search?q=${encodeURIComponent(q)}&limit=10`);
+      const data = await resp.json();
+      suggestions.innerHTML = data.map(s =>
+        `<div class="suggestion-item" onclick="selectSystem('${inputId}','${suggestionsId}','${hiddenId}',${s.id},'${s.name.replace(/'/g, "\\'")}')">
+          ${s.name} <span class="sec sec-${secClass(s.security)}">${s.security.toFixed(1)}</span>
+        </div>`
+      ).join('');
+      suggestions.classList.toggle('show', data.length > 0);
+    } catch(e) {
+      suggestions.innerHTML = '';
+    }
+  }, 300));
+
+  input.addEventListener('blur', () => {
+    setTimeout(() => suggestions.classList.remove('show'), 200);
+  });
+}
+
+function selectSystem(inputId, suggestionsId, hiddenId, id, name) {
+  document.getElementById(inputId).value = name;
+  document.getElementById(hiddenId).value = id;
+  document.getElementById(suggestionsId).classList.remove('show');
+  document.getElementById(suggestionsId).innerHTML = '';
+  if (inputId === 'avoid-input') {
+    addAvoidSystem();
+  }
+}
+
+function secClass(sec) {
+  if (sec >= 0.5) return 'high';
+  if (sec > 0.0) return 'low';
+  return 'zero';
+}
+
+// ── Waypoint Management ──────────────────────────────────────
+
+function addWaypoint() {
+  const container = document.getElementById('waypoints-container');
+  const idx = waypointCounter++;
+  const div = document.createElement('div');
+  div.className = 'waypoint-row';
+  div.id = `waypoint-row-${idx}`;
+  div.innerHTML = `
+    <span class="waypoint-label">途经</span>
+    <div class="input-group" style="flex:1;min-width:0">
+      <input type="text" id="wp-input-${idx}" placeholder="输入星系名称..." autocomplete="off">
+      <div class="autocomplete" id="wp-suggestions-${idx}"></div>
+      <input type="hidden" id="wp-id-${idx}">
+    </div>
+    <button type="button" class="btn-remove" onclick="removeWaypoint(${idx})" title="移除此途经点">&times;</button>
+  `;
+  container.appendChild(div);
+  setupAutocomplete(`wp-input-${idx}`, `wp-suggestions-${idx}`, `wp-id-${idx}`);
+  document.getElementById(`wp-input-${idx}`).focus();
+}
+
+function removeWaypoint(idx) {
+  const row = document.getElementById(`waypoint-row-${idx}`);
+  if (row) row.remove();
+}
+
+function getWaypoints() {
+  const ids = [];
+  document.getElementById('waypoints-container').querySelectorAll('input[type="hidden"]').forEach(inp => {
+    const v = inp.value;
+    if (v) ids.push(parseInt(v));
+  });
+  return ids;
+}
+
+// ── Avoid Systems ────────────────────────────────────────────
+
+async function loadAvoidSystems() {
+  try {
+    const resp = await fetch('/api/avoid-systems');
+    const systems = await resp.json();
+    renderAvoidList(systems);
+  } catch(e) { console.error('loadAvoidSystems', e); }
+}
+
+function renderAvoidList(systems) {
+  const list = document.getElementById('avoid-list');
+  const countEl = document.getElementById('avoid-count');
+  countEl.textContent = systems.length > 0 ? `(${systems.length})` : '';
+  if (!systems.length) {
+    list.innerHTML = '<span class="avoid-empty">暂无避开的星系</span>';
+    return;
+  }
+  list.innerHTML = systems.map(s =>
+    `<div class="avoid-item">
+      <span class="sec sec-${secClass(s.security || 0)}">${(s.security || 0).toFixed(1)}</span>
+      <span class="avoid-name">${s.system_name}</span>
+      <button type="button" class="btn-remove-sm" onclick="removeAvoidSystem(${s.system_id})">&times;</button>
+    </div>`
+  ).join('');
+}
+
+function toggleAvoidSection() {
+  const body = document.getElementById('avoid-body');
+  const icon = document.getElementById('avoid-toggle-icon');
+  body.classList.toggle('hidden');
+  icon.textContent = body.classList.contains('hidden') ? '\u25B6' : '\u25BC';
+}
+
+async function addAvoidSystem() {
+  const id = document.getElementById('avoid-id').value;
+  const name = document.getElementById('avoid-input').value;
+  if (!id) return;
+
+  let security = 0;
+  try {
+    const resp = await fetch(`/api/systems/search?q=${encodeURIComponent(name)}&limit=1`);
+    const data = await resp.json();
+    if (data.length > 0) security = data[0].security || 0;
+  } catch(e) {}
+
+  try {
+    await fetch('/api/avoid-systems', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({system_id: parseInt(id), system_name: name, security: security})
+    });
+    document.getElementById('avoid-input').value = '';
+    document.getElementById('avoid-id').value = '';
+    loadAvoidSystems();
+  } catch(e) {
+    showError('添加避开星系失败: ' + e.message);
+  }
+}
+
+async function removeAvoidSystem(systemId) {
+  try {
+    await fetch(`/api/avoid-systems/${systemId}`, {method: 'DELETE'});
+    loadAvoidSystems();
+  } catch(e) {
+    showError('移除避开星系失败: ' + e.message);
+  }
+}
+
+// ── Route Calculation ────────────────────────────────────────
+
+async function calculateRoute() {
+  const source = document.getElementById('source-id').value;
+  const target = document.getElementById('target-id').value;
+  const jumpRange = document.querySelector('input[name="jump_range"]:checked')?.value || '10';
+
+  const errorDiv = document.getElementById('error-msg');
+  const resultDiv = document.getElementById('route-result');
+  errorDiv.classList.add('hidden');
+  resultDiv.classList.add('hidden');
+
+  if (!source || !target) {
+    showError('请输入起点和终点星系');
+    return;
+  }
+  if (source === target) {
+    showError('起点和终点不能相同');
+    return;
+  }
+
+  const waypoints = getWaypoints();
+  const calcBtn = document.getElementById('calc-btn');
+  calcBtn.disabled = true;
+  calcBtn.textContent = '计算中...';
+
+  try {
+    let params = new URLSearchParams({from: source, to: target, range: jumpRange});
+    if (document.getElementById('require-buildings')?.checked) params.set('require_buildings', 'true');
+    if (!document.getElementById('query-buildings')?.checked) params.set('skip_buildings', 'true');
+    if (document.getElementById('allow-dirt-road')?.checked) params.set('allow_dirt_road', 'true');
+    if (waypoints.length > 0) params.set('waypoints', waypoints.join(','));
+    const url = `/api/route?${params.toString()}`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+
+    if (data.error) {
+      showError(data.error);
+      return;
+    }
+
+    renderResult(data, !document.getElementById('query-buildings')?.checked);
+  } catch(e) {
+    showError('请求失败: ' + e.message);
+  } finally {
+    calcBtn.disabled = false;
+    calcBtn.textContent = '计算路线';
+  }
+}
+
+function getWaypointIds() {
+  const ids = [];
+  document.getElementById('waypoints-container').querySelectorAll('input[type="hidden"]').forEach(inp => {
+    if (inp.value) ids.push(parseInt(inp.value));
+  });
+  return ids;
+}
+
+function renderResult(data, skipBuildings) {
+  const resultDiv = document.getElementById('route-result');
+  const summary = document.getElementById('route-summary');
+  const modeTag = document.getElementById('route-mode-tag');
+  const pathDiv = document.getElementById('route-path');
+  const noteDiv = document.getElementById('route-note');
+
+  const jumps = data.actual_jumps || (data.path.length - 1);
+  const ly = data.total_ly || 0;
+  const capitalJumps = data.capital_jumps || 0;
+  const stargateJumps = data.stargate_jumps || 0;
+  const dirtRoadJumps = data.dirt_road_jumps || 0;
+
+  let summaryText = `${jumps} 跳 (星门${stargateJumps} + 旗舰${capitalJumps}`;
+  if (dirtRoadJumps > 0) summaryText += ` + 土路${dirtRoadJumps}`;
+  summaryText += `) / ${ly} LY`;
+  summary.textContent = summaryText;
+
+  const isDirtMode = (data.mode || '').includes('dirt');
+  modeTag.textContent = isDirtMode ? `旗舰跳 ${data.jump_range || ''}LY · 土路模式` : `旗舰跳 ${data.jump_range || ''}LY`;
+
+  if (isDirtMode) {
+    noteDiv.textContent = '已启用土路模式：通过星门接驳至有建筑的星系，以减少旗舰跳跃次数';
+    noteDiv.classList.remove('hidden');
+  } else if (skipBuildings) {
+    noteDiv.textContent = '已跳过建筑查询，路线中不显示建筑信息';
+    noteDiv.classList.remove('hidden');
+  } else {
+    const hasPlayer = data.path.some(n =>
+      n.buildings && n.buildings.some(b => b.type === 'player_structure')
+    );
+    if (!hasPlayer) {
+      fetch('/api/auth/status').then(r => r.json()).then(auth => {
+        if (auth.logged_in) {
+          noteDiv.textContent = '路线中未检测到玩家建筑（该路线途经的星系可能无玩家建筑，或建筑搜索关键字未匹配到）';
+        } else {
+          noteDiv.textContent = '未检测到玩家建筑。如需查询玩家建筑，请先前往 SSO 授权登录。';
+        }
+      }).catch(() => {
+        noteDiv.textContent = '未检测到玩家建筑。如需查询玩家建筑，请先前往 SSO 授权登录。';
+      });
+      noteDiv.classList.remove('hidden');
+    } else {
+      noteDiv.classList.add('hidden');
+    }
+  }
+
+  const wpIds = getWaypointIds();
+
+  pathDiv.innerHTML = data.path.map((node, i) => {
+    let role = '';
+    if (i === 0) role = '起点';
+    else if (i === data.path.length - 1) role = '终点';
+    else if (wpIds.includes(node.id)) role = '途经';
+
+    const secClassStr = secClass(node.security);
+
+    let edgeLabel = '';
+    if (i > 0) {
+      if (node.edge_subtype === 'dirt_road') {
+        edgeLabel = `通过星门 ${node.distance_from_prev} LY`;
+      } else if (node.edge_type === 'capital') {
+        edgeLabel = `旗舰跳 ${node.distance_from_prev} LY`;
+      } else {
+        edgeLabel = `星门 ${node.distance_from_prev} LY`;
+      }
+    }
+
+    let edgeCls = '';
+    if (node.edge_subtype === 'dirt_road') {
+      edgeCls = 'path-dirt-road';
+    } else if (node.edge_type === 'capital') {
+      edgeCls = 'path-capital';
+    }
+
+    const bldgCount = (!skipBuildings && node.buildings) ? node.buildings.length : 0;
+    const npcCount = (!skipBuildings && node.buildings) ? node.buildings.filter(b => b.type === 'npc_station').length : 0;
+    const playerCount = bldgCount - npcCount;
+
+    let bldgDetail = '';
+    if (bldgCount > 0) {
+      bldgDetail = ` (NPC: ${npcCount} 玩家: ${playerCount})`;
+    }
+
+    const bldgBadge = bldgCount > 0
+      ? `<span class="bldg-badge" onclick="event.stopPropagation(); openBuildingModal(${node.id}, '${node.name.replace(/'/g, "\\'")}')" title="点击查看所有建筑 (NPC:${npcCount} 玩家:${playerCount})">${bldgCount} 建筑${bldgDetail}</span>`
+      : '';
+
+    const clickable = !skipBuildings && bldgCount > 0 ? ' path-clickable' : '';
+    const roleTag = role ? `<span class="path-role role-${role === '起点' ? 'start' : role === '终点' ? 'end' : 'waypoint'}">${role}</span>` : '';
+
+    return `<div class="path-node ${edgeCls}${clickable}"${!skipBuildings && bldgCount > 0 ? ` onclick="openBuildingModal(${node.id}, '${node.name.replace(/'/g, "\\'")}')"` : ''}>
+      <span class="path-index">${i + 1}.</span>
+      <span class="sec sec-${secClassStr}">${node.security.toFixed(1)}</span>
+      <span class="path-name">${node.name}</span>
+      ${roleTag}
+      <span class="path-edge">${edgeLabel}</span>
+      ${bldgBadge}
+    </div>`;
+  }).join('');
+
+  resultDiv.classList.remove('hidden');
+}
+
+async function openBuildingModal(systemId, systemName) {
+  const modal = document.getElementById('building-modal');
+  const title = document.getElementById('building-modal-title');
+  const body = document.getElementById('building-modal-body');
+
+  title.textContent = systemName + ' — 建筑列表';
+  body.innerHTML = '<div class="loading">加载中...</div>';
+  modal.classList.remove('hidden');
+
+  try {
+    const resp = await fetch(`/api/systems/${systemId}/buildings`);
+    const data = await resp.json();
+
+    if (data.error) {
+      body.innerHTML = `<div class="error-text">${data.error}</div>`;
+      return;
+    }
+
+    const buildings = data.buildings || [];
+    if (buildings.length === 0) {
+      body.innerHTML = '<div class="empty-text">该星系暂无建筑数据</div>';
+      return;
+    }
+
+    const npc = buildings.filter(b => b.building_type === 'npc_station');
+    const player = buildings.filter(b => b.building_type === 'player_structure');
+
+    let html = '';
+
+    if (npc.length > 0) {
+      html += `<div class="building-section">
+        <div class="building-section-title">NPC 空间站 (${npc.length})</div>
+        ${npc.map((b, i) => {
+          const typeName = b.type_name ? ` <span class="building-typename">${b.type_name}</span>` : '';
+          return `<div class="building-row">
+            <span class="building-idx">${i + 1}.</span>
+            <span class="building-name">${b.building_name || '(无名)'}${typeName}</span>
+            <span class="building-id">ID: ${b.building_id}</span>
+          </div>`;
+        }).join('')}
+      </div>`;
+    }
+
+    if (player.length > 0) {
+      html += `<div class="building-section">
+        <div class="building-section-title">玩家建筑 (${player.length})</div>
+        ${player.map((b, i) => {
+          const typeName = b.type_name ? ` <span class="building-typename">${b.type_name}</span>` : '';
+          return `<div class="building-row player-row">
+            <span class="building-idx">${i + 1}.</span>
+            <span class="building-name">${b.building_name || '(无名)'}${typeName}</span>
+            <span class="building-owner">所有者: ${b.owner_name || '未知'}</span>
+            <span class="building-id">ID: ${b.building_id}</span>
+          </div>`;
+        }).join('')}
+      </div>`;
+    }
+
+    body.innerHTML = html;
+  } catch(e) {
+    body.innerHTML = `<div class="error-text">加载失败: ${e.message}</div>`;
+  }
+}
+
+function closeBuildingModal() {
+  document.getElementById('building-modal').classList.add('hidden');
+}
+
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') {
+    closeBuildingModal();
+  }
+});
+
+function showError(msg) {
+  const errorDiv = document.getElementById('error-msg');
+  errorDiv.textContent = msg;
+  errorDiv.classList.remove('hidden');
+}
+
+// ── Initialization ───────────────────────────────────────────
+
+setupAutocomplete('source-input', 'source-suggestions', 'source-id');
+setupAutocomplete('target-input', 'target-suggestions', 'target-id');
+setupAutocomplete('avoid-input', 'avoid-suggestions', 'avoid-id');
+
+document.getElementById('require-buildings').addEventListener('change', function() {
+  if (this.checked) {
+    document.getElementById('query-buildings').checked = true;
+  }
+});
+
+document.getElementById('query-buildings').addEventListener('change', function() {
+  if (!this.checked) {
+    document.getElementById('require-buildings').checked = false;
+  }
+});
+
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && document.activeElement.tagName === 'INPUT' && document.activeElement.id !== 'avoid-input') {
+    e.preventDefault();
+    calculateRoute();
+  }
+});
+
+loadAvoidSystems();
+
+// ── Rebuild / Clear ─────────────────────────────────────────
+
+async function rebuildStarmap() {
+  const btn = document.getElementById('rebuild-btn');
+  const errorDiv = document.getElementById('error-msg');
+  errorDiv.classList.add('hidden');
+
+  if (btn.disabled) return;
+  if (!confirm('重建星图将从 ESI 重新拉取全量数据（约需 10-15 分钟），并自动筛选不可达星系。\n\n确认继续？')) return;
+
+  btn.disabled = true;
+  btn.textContent = '⟳ 启动中...';
+
+  try {
+    const resp = await fetch('/api/rebuild', {method: 'POST'});
+    const data = await resp.json();
+    if (data.status === 'ok') {
+      btn.textContent = '⟳ 重建中...';
+      pollRebuildStatus();
+    } else {
+      showError(data.message || '启动重建失败');
+      btn.disabled = false;
+      btn.textContent = '⟳ 重建星图';
+    }
+  } catch(e) {
+    showError('请求失败: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = '⟳ 重建星图';
+  }
+}
+
+async function pollRebuildStatus() {
+  const btn = document.getElementById('rebuild-btn');
+  try {
+    const resp = await fetch('/api/rebuild/status');
+    const data = await resp.json();
+    btn.textContent = '⟳ ' + (data.progress || '重建中...');
+    if (!data.running) {
+      btn.disabled = false;
+      if (data.result) {
+        btn.textContent = '⟳ 重建完成 (' + data.result.systems + ' 星系)';
+        const logs = data.result.logs || [];
+        if (logs.length > 0) {
+          const e = document.getElementById('error-msg');
+          e.classList.remove('hidden');
+          e.innerHTML = '重建完成: ' + data.result.systems + ' 星系, ' + data.result.stargates + ' 星门, 删除 ' + (data.result.deleted || 0) + ' 不可达星系<br>' + logs.map(l => '<span style="font-size:0.8rem;">' + l + '</span>').join('<br>');
+          e.style.background = '#f0fdf4'; e.style.borderColor = '#bbf7d0'; e.style.color = '#166534';
+          setTimeout(() => { e.classList.add('hidden'); e.style.background = ''; e.style.borderColor = ''; e.style.color = ''; }, 30000);
+        }
+      } else {
+        btn.textContent = '⟳ 重建失败';
+        setTimeout(() => { btn.textContent = '⟳ 重建星图'; }, 5000);
+      }
+    } else {
+      setTimeout(pollRebuildStatus, 3000);
+    }
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = '⟳ 重建星图';
+    showError('状态查询失败: ' + e.message);
+  }
+}
+
+function showSuccess(msg) {
+  const div = document.getElementById('error-msg');
+  div.textContent = msg;
+  div.style.background = '#f0fdf4'; div.style.borderColor = '#bbf7d0'; div.style.color = '#166534';
+  div.classList.remove('hidden');
+  setTimeout(() => { div.classList.add('hidden'); div.style.background = ''; div.style.borderColor = ''; div.style.color = ''; }, 5000);
+}
+</script>
+</body>
+</html>
