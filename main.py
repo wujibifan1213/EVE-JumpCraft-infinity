@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from config import setup_logging
-from services.sync import pull_full_map, filter_unreachable, load_npc_stations
+from services.sync import full_rebuild
 
 _log = setup_logging("main")
 
@@ -44,16 +44,15 @@ def _init_data(force_refresh: bool):
             _log.info("Forcing full refresh from ESI...")
         else:
             _log.info("No cache found, pulling full map from ESI (may take 10-15 minutes)...")
-        pull_result = pull_full_map()
-        filter_result = filter_unreachable()
-        load_npc_stations()
+        G, result = full_rebuild()
     else:
         _log.info("Using cached data: %d systems.", len(existing_systems))
+        from graph.builder import build_graph
+        G = build_graph()
 
-    from graph.builder import build_graph, get_connected_components
-    G = build_graph()
-    comp = get_connected_components(G)
     _log.info("Graph: %d nodes, %d edges", G.number_of_nodes(), G.number_of_edges())
+    from graph.builder import get_connected_components
+    comp = get_connected_components(G)
     _log.info("Largest component: %d systems, %d components, %d unreachable",
               comp['largest_size'], comp['component_count'], comp['unreachable_count'])
 

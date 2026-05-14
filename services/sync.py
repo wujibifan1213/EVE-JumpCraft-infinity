@@ -140,7 +140,7 @@ def load_npc_stations(progress_callback=None):
 
 
 def full_rebuild(progress_callback=None):
-    """Complete rebilld: pull map, filter unreachable, load NPC stations, rebuild graph.
+    """Complete rebuild: pull map, filter unreachable, load NPC stations, rebuild graph.
 
     Args:
         progress_callback: Optional callable(msg) for progress updates.
@@ -153,9 +153,20 @@ def full_rebuild(progress_callback=None):
     load_npc_stations(progress_callback)
 
     from graph.builder import build_graph
+    from graph.validator import get_unreachable_systems, filter_unreachable_systems
     from graph.routes import clear_capital_cache
 
     G = build_graph()
+    remaining = get_unreachable_systems(G)
+    if remaining:
+        _log.info("Final cleanup: %d systems still unreachable after ESI verification, deleting...",
+                  len(remaining))
+        cleanup_result = filter_unreachable_systems(G, esi_verify=False)
+        filter_result["deleted"] += cleanup_result["deleted"]
+        for line in cleanup_result.get("logs", []):
+            _log.info("  " + line)
+        G = build_graph()
+
     clear_capital_cache()
 
     return G, {
