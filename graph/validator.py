@@ -193,10 +193,6 @@ def filter_unreachable_systems(G: nx.Graph,
     # Delete confirmed unreachable systems
     delete_list = sorted(to_delete)
     if delete_list:
-        for sid in delete_list:
-            node = G.nodes[sid]
-            _log.info("  Deleting: %s (id=%d, sec=%.1f)", node.get("name", "?"), sid, node.get("security", 0) or 0)
-
         batch_size = 500
         for i in range(0, len(delete_list), batch_size):
             batch = delete_list[i:i + batch_size]

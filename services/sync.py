@@ -95,8 +95,6 @@ def filter_unreachable(progress_callback=None):
     _log.info("====== Unreachable Filter Started ======")
     tmp_G = _build_tmp()
     result = filter_unreachable_systems(tmp_G, esi_verify=True)
-    for line in result.get("logs", []):
-        _log.info("  " + line)
     if result["deleted"] > 0:
         _log.info("Removed %d unreachable systems. Remaining: %d", result["deleted"], result["kept"])
     _log.info("====== Unreachable Filter Complete ======")
@@ -163,8 +161,6 @@ def full_rebuild(progress_callback=None):
                   len(remaining))
         cleanup_result = filter_unreachable_systems(G, esi_verify=False)
         filter_result["deleted"] += cleanup_result["deleted"]
-        for line in cleanup_result.get("logs", []):
-            _log.info("  " + line)
         G = build_graph()
 
     clear_capital_cache()
